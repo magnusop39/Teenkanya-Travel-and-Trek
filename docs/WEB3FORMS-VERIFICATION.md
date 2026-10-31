@@ -1,8 +1,8 @@
 # Web3Forms Verification
 
 Date: 2026-10-31  
-Branch: `v1/web3forms-verification`  
-Intended PR base: `v1/enquiry-api`
+Branch: `v1/web3forms-standard-review-fix`  
+Intended PR base: `v1/enquiry-api` (currently absent from the remote; local reference is `5d044f8`)
 
 ## Automated checks
 
@@ -38,9 +38,16 @@ The existing saved enquiry reference `TTT-261031-EEBDBC3046BF3F96` was not re-su
 
 ## Security and remaining limitations
 
-- `WEB3FORMS_ACCESS_KEY` is read only in the server-only provider module. The UI receives generic application messages and never receives provider response text.
-- Vercel documents `x-real-ip` as identical to its client-IP `x-forwarded-for` header and overwrites forwarded IP data by default to prevent spoofing. The API now validates and uses only `x-real-ip`; absent/malformed values share the `unknown` rate-limit bucket, and `x-forwarded-for` is never a fallback ([Vercel request headers](https://vercel.com/docs/headers/request-headers)).
+- Supabase credentials remain server-only. In the free Standard browser integration, `WEB3FORMS_ACCESS_KEY` is recipient-bound and intentionally public; it is returned only after the enquiry is saved. The UI receives generic application messages and never receives raw provider response text.
+- Vercel documents `x-real-ip` as the trusted client IP header. The current API validates and uses only `x-real-ip`; missing or malformed values fail closed with a retryable service error and never share an `unknown` bucket or fall back to `x-forwarded-for` ([Vercel request headers](https://vercel.com/docs/headers/request-headers)).
 - Route logs contain fixed operational messages only; provider bodies, credentials, and transport errors are not logged. `VERCEL_AUTOMATION_BYPASS_SECRET` was used only by the Vercel CLI for protected-preview requests, not committed or passed to client code. `vercel env ls` initially showed it in Production, Preview, and Development. After approval, the Production scope was removed and verified; it now remains in Preview and Development. Vercel warned that removing the environment target does not rotate or revoke the underlying credential. No production deployment occurred.
 - The Standard payload uses the recipient bound to `WEB3FORMS_ACCESS_KEY` and sends neither `to` nor Pro-only `ccemail`. The key-bound recipient and its verified status still require confirmation in the Web3Forms dashboard. The previously configured `CONTACT_TO_EMAIL` variable is no longer read by the application.
 - No email arrival in the sandbox inbox was confirmed. The live provider response was not successful, and inbox access is unavailable.
-- No production deployment or merge was performed. PR #3 is the already-merged foundation PR targeting `main`; it was left untouched. No PR is open for this branch. GitHub CLI has read-only PR permissions, so this branch could not be opened as a draft PR here. The API hardening commit `7becfc9c275c8060211c33791759a34c15c67c61` is pushed; this verification note follows it. Use this compare link to open a draft PR with base `v1/enquiry-api`: https://github.com/sudippandey/Teenkanya-Travel-and-Trek/compare/v1/enquiry-api...v1/web3forms-verification?expand=1
+- No production deployment or merge was performed. PR #3 is the already-merged foundation PR targeting `main`; it was left untouched. GitHub CLI has read-only PR permissions, so a draft PR cannot be opened from this workspace. The prior compare link used `v1/enquiry-api`, but GitHub now returns 404 for that remote branch; the local ref points to `5d044f8`. The current review branch is `v1/web3forms-standard-review-fix`.
+
+## Follow-up review: browser-side Standard flow
+
+- The current code saves to Supabase first, then submits to the browser-only Web3Forms Standard endpoint. The retry action calls only Web3Forms and does not re-post the enquiry. A short-lived signed token protects status updates; the UI reports provider acceptance separately from inbox delivery.
+- Known idempotent retries are checked before consuming a rate-limit attempt. A concurrent first-request race can still consume an extra attempt because the existing limiter is a separate database RPC; the unique submission ID still prevents duplicate rows.
+- `pnpm check` and `pnpm build` passed for this revision. The live browser test did not reach the expected saved state: the local preview returned HTTP 200 for the API requests, but the form showed its generic confirmation error. A read-only query for the exact synthetic QA name/message returned no saved row. No Web3Forms acceptance or email arrival is confirmed; no real customer data was submitted.
+- The branch deployment reached `Ready` at `https://tenkanyatravelandtrek-q3fjhplxa-aura-ff3b.vercel.app`, but Vercel Preview Protection prevented direct browser access, and the local preview stopped listening during the verification attempt. End-to-end Preview behavior therefore remains unverified.
