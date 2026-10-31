@@ -2,7 +2,7 @@
 
 Date: 2026-10-31  
 Branch: `v1/web3forms-standard-review-fix`  
-Intended PR base: `v1/enquiry-api` (currently absent from the remote; local reference is `5d044f8`)
+Intended PR base: `v1/enquiry-api` (restored on GitHub at `5d044f8` after explicit approval)
 
 ## Automated checks
 
@@ -43,7 +43,7 @@ The existing saved enquiry reference `TTT-261031-EEBDBC3046BF3F96` was not re-su
 - Route logs contain fixed operational messages only; provider bodies, credentials, and transport errors are not logged. `VERCEL_AUTOMATION_BYPASS_SECRET` was used only by the Vercel CLI for protected-preview requests, not committed or passed to client code. `vercel env ls` initially showed it in Production, Preview, and Development. After approval, the Production scope was removed and verified; it now remains in Preview and Development. Vercel warned that removing the environment target does not rotate or revoke the underlying credential. No production deployment occurred.
 - The Standard payload uses the recipient bound to `WEB3FORMS_ACCESS_KEY` and sends neither `to` nor Pro-only `ccemail`. The key-bound recipient and its verified status still require confirmation in the Web3Forms dashboard. The previously configured `CONTACT_TO_EMAIL` variable is no longer read by the application.
 - No email arrival in the sandbox inbox was confirmed. The live provider response was not successful, and inbox access is unavailable.
-- No production deployment or merge was performed. PR #3 is the already-merged foundation PR targeting `main`; it was left untouched. GitHub CLI has read-only PR permissions, so a draft PR cannot be opened from this workspace. The prior compare link used `v1/enquiry-api`, but GitHub now returns 404 for that remote branch; the local ref points to `5d044f8`. The current review branch is `v1/web3forms-standard-review-fix`.
+- No production deployment or merge was performed. PR #3 is the already-merged foundation PR targeting `main`; it was left untouched. After explicit approval, the requested `v1/enquiry-api` base was restored on GitHub at `5d044f8`. The draft PR itself could not be opened from this workspace because GitHub CLI has read-only pull-request permissions. The current review branch is `v1/web3forms-standard-review-fix`.
 
 ## Follow-up review: browser-side Standard flow
 
