@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { ArrowUpRight, Check } from 'lucide-react'
+import { submitWeb3Forms } from '@/lib/enquiries/web3forms'
+import type { Web3FormsEnquiry } from '@/lib/enquiries/web3forms'
 
 interface EnquiryResponse {
   status?: unknown
@@ -10,7 +12,17 @@ interface EnquiryResponse {
   message?: unknown
   reference?: unknown
   saved?: unknown
+  duplicate?: unknown
+  notificationStatus?: unknown
+  notificationAccessKey?: unknown
+  notificationToken?: unknown
   fieldErrors?: unknown
+}
+
+interface PendingNotification {
+  enquiry: Web3FormsEnquiry
+  accessKey: string
+  token: string
 }
 
 function isRecord(value: unknown): value is EnquiryResponse {
@@ -24,15 +36,41 @@ function getFieldErrors(value: unknown) {
   )
 }
 
+function getFormSnapshot(formData: FormData, submissionId: string): Omit<Web3FormsEnquiry, 'reference'> {
+  const travellerCount = String(formData.get('travellerCount') ?? '').trim()
+  const email = String(formData.get('email') ?? '').trim()
+  const phone = String(formData.get('phone') ?? '').trim()
+  const countryOfResidence = String(formData.get('countryOfResidence') ?? '').trim()
+  const travelStartDate = String(formData.get('travelStartDate') ?? '').trim()
+
+  return {
+    submissionId,
+    fullName: String(formData.get('fullName') ?? '').trim(),
+    email: email || null,
+    phone: phone || null,
+    countryOfResidence: countryOfResidence || null,
+    preferredContactChannel: String(formData.get('preferredContactChannel') ?? 'email') as Web3FormsEnquiry['preferredContactChannel'],
+    interest: String(formData.get('interest') ?? 'other') as Web3FormsEnquiry['interest'],
+    message: String(formData.get('message') ?? '').trim(),
+    travelStartDate: travelStartDate || null,
+    datesFlexible: formData.get('datesFlexible') === 'on',
+    travellerCount: travellerCount ? Number(travellerCount) : null,
+    sourcePage: window.location.pathname,
+  }
+}
+
 export function ContactForm() {
   const submissionId = useRef<string | null>(null)
+  const formRef = useRef<HTMLFormElement>(null)
   const successRef = useRef<HTMLDivElement>(null)
   const [submitted, setSubmitted] = useState(false)
+  const [statusTrackingFailed, setStatusTrackingFailed] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [submissionLocked, setSubmissionLocked] = useState(false)
   const [error, setError] = useState('')
   const [failureReference, setFailureReference] = useState('')
   const [successReference, setSuccessReference] = useState('')
+  const [pendingNotification, setPendingNotification] = useState<PendingNotification | null>(null)
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
 
   useEffect(() => {
@@ -41,30 +79,62 @@ export function ContactForm() {
     successRef.current.scrollIntoView({ block: 'start' })
   }, [submitted])
 
+  async function recordNotificationStatus(job: PendingNotification, status: 'sent' | 'failed') {
+    try {
+      const response = await fetch('/api/enquiries/notification', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          submissionId: job.enquiry.submissionId,
+          reference: job.enquiry.reference,
+          status,
+          token: job.token,
+        }),
+      })
+      return response.ok
+    } catch {
+      return false
+    }
+  }
+
+  async function deliverNotification(job: PendingNotification) {
+    const result = await submitWeb3Forms(job.enquiry, job.accessKey)
+    const status = result.success ? 'sent' : 'failed'
+    const statusRecorded = await recordNotificationStatus(job, status)
+
+    if (result.success) {
+      setStatusTrackingFailed(!statusRecorded)
+      setSubmitted(true)
+      setSubmissionLocked(false)
+      setError('')
+      setFailureReference('')
+      setSuccessReference(job.enquiry.reference)
+      setPendingNotification(null)
+      submissionId.current = null
+      formRef.current?.reset()
+      return
+    }
+
+    setSubmissionLocked(true)
+    setFailureReference(job.enquiry.reference)
+    setPendingNotification(job)
+    setError('Your enquiry is saved, but Web3Forms did not confirm acceptance of the email notification. You can retry the notification without creating another enquiry. If the provider accepted the request but its response was interrupted, our team could receive a duplicate email.')
+  }
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const form = event.currentTarget
-    if (!form.reportValidity() || isSubmitting) return
+    if (!form.reportValidity() || isSubmitting || submissionLocked) return
 
     setError('')
     setFieldErrors({})
     setIsSubmitting(true)
-    setSubmissionLocked(true)
     submissionId.current ??= crypto.randomUUID()
 
     const formData = new FormData(form)
+    const snapshot = getFormSnapshot(formData, submissionId.current)
     const payload = {
-      submissionId: submissionId.current,
-      fullName: formData.get('fullName'),
-      email: formData.get('email'),
-      phone: formData.get('phone'),
-      countryOfResidence: formData.get('countryOfResidence'),
-      preferredContactChannel: formData.get('preferredContactChannel'),
-      interest: formData.get('interest'),
-      message: formData.get('message'),
-      travelStartDate: formData.get('travelStartDate'),
-      datesFlexible: formData.get('datesFlexible') === 'on',
-      travellerCount: formData.get('travellerCount') || null,
+      ...snapshot,
       website: formData.get('website'),
     }
 
@@ -82,25 +152,49 @@ export function ContactForm() {
         result = null
       }
 
-      if (response.ok && isRecord(result) && result.status === 'received' && typeof result.reference === 'string') {
-        setSubmitted(true)
-        setSubmissionLocked(false)
-        setFailureReference('')
-        setSuccessReference(result.reference)
-        submissionId.current = null
-        form.reset()
+      if (isRecord(result) && result.saved === true && typeof result.reference === 'string') {
+        const job = typeof result.notificationAccessKey === 'string'
+          && typeof result.notificationToken === 'string'
+          ? {
+              enquiry: { ...snapshot, reference: result.reference },
+              accessKey: result.notificationAccessKey,
+              token: result.notificationToken,
+            }
+          : null
+
+        setSubmissionLocked(true)
+        setFailureReference(result.reference)
+
+        if (result.notificationStatus === 'sent') {
+          setStatusTrackingFailed(false)
+          setSubmitted(true)
+          setSuccessReference(result.reference)
+          setFailureReference('')
+          submissionId.current = null
+          form.reset()
+          return
+        }
+
+        if (!job) {
+          setPendingNotification(null)
+          setError('Your enquiry is saved, but email notification is not configured. Please contact our team with the saved reference.')
+          return
+        }
+
+        if (result.duplicate === true || result.notificationStatus === 'not_configured') {
+          setPendingNotification(job)
+          setError('Your enquiry is already saved. Use the notification-only retry below if the email was not accepted. This will not create another enquiry.')
+          return
+        }
+
+        await deliverNotification(job)
         return
       }
 
-      const saved = isRecord(result) && result.saved === true
-      const reference = isRecord(result) && typeof result.reference === 'string' ? result.reference : ''
       const validationErrors = getFieldErrors(result)
       setFieldErrors(validationErrors)
 
-      if (saved) {
-        setFailureReference(reference)
-        setSubmissionLocked(true)
-      } else if (response.status < 500) {
+      if (response.status < 500) {
         setFailureReference('')
         setSubmissionLocked(false)
       }
@@ -117,10 +211,23 @@ export function ContactForm() {
     }
   }
 
-  function startNewEnquiry() {
+  async function retryNotification() {
+    if (!pendingNotification || isSubmitting) return
+    setError('')
+    setIsSubmitting(true)
+
+    try {
+      await deliverNotification(pendingNotification)
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  function startSeparateEnquiry() {
     submissionId.current = null
     setSubmissionLocked(false)
     setFailureReference('')
+    setPendingNotification(null)
     setError('')
     setFieldErrors({})
   }
@@ -128,13 +235,14 @@ export function ContactForm() {
   return <div className="contact-form-wrap">
     {submitted ? <div ref={successRef} className="form-success" role="status" tabIndex={-1}>
       <span className="success-icon"><Check aria-hidden="true" /></span>
-      <span className="eyebrow">ENQUIRY SENT</span>
+      <span className="eyebrow">ENQUIRY SAVED</span>
       <h3>Thank you for getting in touch.</h3>
-      <p>Web3Forms confirmed your enquiry was submitted to our team. This is not a booking confirmation.</p>
+      <p>Your enquiry is saved in our system. Web3Forms accepted the email notification for processing; this does not confirm inbox delivery or a booking.</p>
+      {statusTrackingFailed && <p>The email was accepted, but its tracking status could not be updated.</p>}
       {successReference && <p className="success-reference">Reference: <strong>{successReference}</strong></p>}
       <div className="success-actions"><a href="tel:+9779851248173">Call +977 9851248173</a><a href="mailto:3kanya2018@gmail.com">Email our team</a></div>
-      <button type="button" className="text-link" onClick={() => { setSubmitted(false); startNewEnquiry() }}>Send another enquiry</button>
-    </div> : <form className="contact-form" onSubmit={handleSubmit}>
+      <button type="button" className="text-link" onClick={() => { setSubmitted(false); setStatusTrackingFailed(false); startSeparateEnquiry() }}>Send another enquiry</button>
+    </div> : <form ref={formRef} className="contact-form" onSubmit={handleSubmit}>
       <div className="form-row">
         <label htmlFor="enquiry-full-name">Your name
           <input id="enquiry-full-name" name="fullName" autoComplete="name" required minLength={2} maxLength={120} placeholder="Full name" disabled={isSubmitting || submissionLocked} aria-invalid={Boolean(fieldErrors.fullName)} aria-describedby={fieldErrors.fullName ? 'enquiry-full-name-error' : undefined} />
@@ -188,10 +296,11 @@ export function ContactForm() {
       {error && <div className="form-error" role="alert">
         <p>{error}</p>
         {failureReference && <p>Saved enquiry reference: <strong>{failureReference}</strong></p>}
-        {submissionLocked && <button type="button" className="text-link" onClick={startNewEnquiry}>Edit details and submit as a new enquiry</button>}
+        {pendingNotification && <button type="button" className="text-link" onClick={retryNotification} disabled={isSubmitting}>{isSubmitting ? 'Retrying notification…' : 'Retry email notification only'}</button>}
+        {submissionLocked && <button type="button" className="text-link" onClick={startSeparateEnquiry}>Edit details and submit a separate enquiry</button>}
       </div>}
-      <div className="form-submit-row"><p>Sending an enquiry does not confirm a booking. Our team will follow up using your preferred contact method.</p><button className="button button-primary" type="submit" disabled={isSubmitting}>{isSubmitting ? 'Sending…' : submissionLocked ? 'Retry submission' : 'Send an enquiry'} <ArrowUpRight aria-hidden="true" /></button></div>
-      <p className="form-disclaimer">Your details are used to respond to this enquiry. If a saved enquiry cannot be emailed, retrying uses the same reference and does not create a duplicate.</p>
+      <div className="form-submit-row"><p>Sending an enquiry does not confirm a booking. Our team will follow up using your preferred contact method.</p><button className="button button-primary" type="submit" disabled={isSubmitting || submissionLocked}>{isSubmitting ? 'Saving…' : 'Send an enquiry'} <ArrowUpRight aria-hidden="true" /></button></div>
+      <p className="form-disclaimer">Your enquiry is saved before the browser contacts Web3Forms. The notification uses the recipient bound to the public access key; an accepted notification is not proof of inbox delivery.</p>
     </form>}
   </div>
 }

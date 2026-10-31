@@ -1,5 +1,4 @@
-import { sendEnquiryNotification } from '@/lib/enquiries/notification-provider.server'
-import { saveEnquiry, updateEnquiryNotificationStatus } from '@/lib/enquiries/server'
+import { createEnquiryNotificationToken, saveEnquiry } from '@/lib/enquiries/server'
 import { getTrustedClientIdentifier } from '@/lib/enquiries/client-identifier'
 import { maxEnquiryRequestBodyBytes, readRequestBodyBounded } from '@/lib/enquiries/request-body'
 import { processEnquirySubmission } from '@/lib/enquiries/submission-workflow'
@@ -76,11 +75,9 @@ export async function POST(request: Request) {
     return respond({ error: 'invalid_json', message: 'The form could not be read. Please try again.' }, 400)
   }
 
-  const bodyText = bodyResult.text
-
   let payload: unknown
   try {
-    payload = JSON.parse(bodyText)
+    payload = JSON.parse(bodyResult.text)
   } catch {
     return respond({ error: 'invalid_json', message: 'The form could not be read. Please try again.' }, 400)
   }
@@ -94,11 +91,7 @@ export async function POST(request: Request) {
       payload,
       getTrustedClientIdentifier(request.headers),
       getSourcePage(request),
-      {
-        persist: saveEnquiry,
-        notify: sendEnquiryNotification,
-        updateNotificationStatus: updateEnquiryNotificationStatus,
-      },
+      { persist: saveEnquiry },
     )
 
     if (outcome.status === 'invalid') {
@@ -109,6 +102,13 @@ export async function POST(request: Request) {
       }, 422)
     }
 
+    if (outcome.status === 'client_identifier_unavailable') {
+      return respond({
+        error: 'client_identifier_unavailable',
+        message: 'We could not verify this connection. Please try again in a moment.',
+      }, 503)
+    }
+
     if (outcome.status === 'rate_limited') {
       return respond(
         { error: 'rate_limited', message: 'Please wait a little before sending another enquiry.' },
@@ -117,40 +117,25 @@ export async function POST(request: Request) {
       )
     }
 
-    if (outcome.status === 'notification_pending') {
-      return respond({
-        error: 'notification_pending',
-        saved: true,
-        reference: outcome.reference,
-        message: 'Your enquiry is saved, but its email notification is still being processed. Please wait a moment before retrying.',
-      }, 409)
-    }
+    const submissionId = isRecord(payload) && typeof payload.submissionId === 'string'
+      ? payload.submissionId
+      : ''
 
-    if (outcome.status === 'notification_failed') {
-      if (outcome.statusUpdateFailed) {
-        console.error('[api/enquiries] Notification failure state could not be saved')
-      }
-      return respond({
-        error: 'notification_failed',
-        saved: true,
-        reference: outcome.reference,
-        message: 'Your enquiry is saved, but Web3Forms did not confirm the email submission. Please retry, or contact our team with the saved reference.',
-      }, 502)
-    }
-
-    if (outcome.statusUpdateFailed) {
-      console.error('[api/enquiries] Notification success state could not be saved')
-    }
-
-    return respond(
-      { status: 'received', reference: outcome.reference },
-      outcome.duplicate ? 200 : 201,
-    )
+    return respond({
+      status: 'saved',
+      saved: true,
+      reference: outcome.reference,
+      notificationStatus: outcome.notificationStatus,
+      duplicate: outcome.duplicate,
+      notificationAccessKey: process.env.WEB3FORMS_ACCESS_KEY?.trim() || null,
+      notificationToken: createEnquiryNotificationToken(submissionId, outcome.reference),
+      message: 'Your enquiry is saved. Email notification is submitted separately.',
+    }, outcome.duplicate ? 200 : 201)
   } catch {
-    console.error('[api/enquiries] Unable to complete enquiry submission')
+    console.error('[api/enquiries] Unable to save enquiry')
     return respond({
       error: 'submission_unavailable',
-      message: 'We could not complete your enquiry. Please retry with the same details or contact our team directly.',
+      message: 'We could not confirm whether your enquiry was saved. Retry with the same details; the submission reference prevents duplicates.',
     }, 503)
   }
 }

@@ -78,17 +78,17 @@ test('uses Vercel x-real-ip and ignores a spoofed forwarded chain', () => {
   assert.equal(getTrustedClientIdentifier(headers), '203.0.113.42')
 })
 
-test('does not use x-forwarded-for when the trusted IP header is missing', () => {
+test('missing x-real-ip does not create a shared unknown rate-limit bucket', () => {
   const headers = new Headers({ 'x-forwarded-for': '198.51.100.99' })
 
-  assert.equal(getTrustedClientIdentifier(headers), 'unknown')
+  assert.equal(getTrustedClientIdentifier(headers), null)
 })
 
-test('does not use x-forwarded-for when the trusted IP header is malformed', () => {
+test('malformed x-real-ip does not fall back to a spoofable forwarded chain', () => {
   const headers = new Headers({
     'x-real-ip': 'not-an-ip',
     'x-forwarded-for': '198.51.100.99',
   })
 
-  assert.equal(getTrustedClientIdentifier(headers), 'unknown')
+  assert.equal(getTrustedClientIdentifier(headers), null)
 })

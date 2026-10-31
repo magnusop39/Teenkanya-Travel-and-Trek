@@ -2,13 +2,9 @@ import 'server-only'
 
 import { createHmac, randomBytes } from 'node:crypto'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import { createNotificationToken, verifyNotificationToken } from './notification-token'
+import { persistIfNew, type EnquiryNotificationStatus, type EnquiryPersistenceResult } from './submission-workflow'
 import type { ValidatedEnquiry } from './validation'
-import type {
-  EnquiryDeliverySnapshot,
-  EnquiryNotificationStatus,
-  EnquiryPersistenceResult,
-  PersistedEnquiry,
-} from './submission-workflow'
 
 interface EnquiryForStorage extends ValidatedEnquiry {
   sourcePage: string
@@ -22,19 +18,17 @@ interface EnquiryRow {
   email: string | null
   phone: string | null
   country_of_residence: string | null
-  preferred_contact_channel: EnquiryDeliverySnapshot['preferredContactChannel']
-  interest: EnquiryDeliverySnapshot['interest']
+  preferred_contact_channel: ValidatedEnquiry['preferredContactChannel']
+  interest: ValidatedEnquiry['interest']
   message: string
   travel_start_date: string | null
   dates_flexible: boolean
   traveller_count: number | null
   source_page: string | null
   notification_status: EnquiryNotificationStatus
-  updated_at: string
 }
 
-const enquiryColumns = 'id,submission_id,reference,full_name,email,phone,country_of_residence,preferred_contact_channel,interest,message,travel_start_date,dates_flexible,traveller_count,source_page,notification_status,updated_at'
-const notificationLeaseMs = 2 * 60 * 1000
+const enquiryColumns = 'id,submission_id,reference,full_name,email,phone,country_of_residence,preferred_contact_channel,interest,message,travel_start_date,dates_flexible,traveller_count,source_page,notification_status'
 
 let cachedClient: SupabaseClient | null = null
 let cachedSecret: string | null = null
@@ -71,34 +65,11 @@ function createReference() {
   return `TTT-${datePart}-${randomBytes(8).toString('hex').toUpperCase()}`
 }
 
-function toPersistedEnquiry(
-  row: EnquiryRow,
-  shouldNotify: boolean,
-  duplicate: boolean,
-): PersistedEnquiry {
-  const deliverySnapshot: EnquiryDeliverySnapshot = {
-    submissionId: row.submission_id,
-    reference: row.reference,
-    fullName: row.full_name,
-    email: row.email,
-    phone: row.phone,
-    countryOfResidence: row.country_of_residence,
-    preferredContactChannel: row.preferred_contact_channel,
-    interest: row.interest,
-    message: row.message,
-    travelStartDate: row.travel_start_date,
-    datesFlexible: row.dates_flexible,
-    travellerCount: row.traveller_count,
-    sourcePage: row.source_page ?? '/contact',
-  }
-
+function toPersistedEnquiry(row: EnquiryRow) {
   return {
-    status: 'saved',
+    status: 'saved' as const,
     reference: row.reference,
     notificationStatus: row.notification_status,
-    shouldNotify,
-    duplicate,
-    deliverySnapshot,
   }
 }
 
@@ -113,89 +84,88 @@ async function findExistingEnquiry(client: SupabaseClient, submissionId: string)
   return data as EnquiryRow | null
 }
 
-async function resolveExistingEnquiry(
-  client: SupabaseClient,
-  row: EnquiryRow,
-): Promise<PersistedEnquiry> {
-  const pendingIsStale = row.notification_status === 'pending'
-    && Date.parse(row.updated_at) < Date.now() - notificationLeaseMs
-  const canClaim = row.notification_status === 'failed'
-    || row.notification_status === 'not_configured'
-    || pendingIsStale
-
-  if (!canClaim) return toPersistedEnquiry(row, false, true)
-
-  const { data: claimed, error } = await client
-    .from('enquiries')
-    .update({ notification_status: 'pending', updated_at: new Date().toISOString() })
-    .eq('id', row.id)
-    .eq('notification_status', row.notification_status)
-    .eq('updated_at', row.updated_at)
-    .select(enquiryColumns)
-    .maybeSingle()
-
-  if (error) throw new Error('Enquiry notification could not be claimed')
-  if (claimed) return toPersistedEnquiry(claimed as EnquiryRow, true, true)
-
-  const latest = await findExistingEnquiry(client, row.submission_id)
-  if (!latest) throw new Error('Existing enquiry could not be retrieved')
-  return toPersistedEnquiry(latest, false, true)
-}
-
 export async function saveEnquiry(
   enquiry: EnquiryForStorage,
   clientIdentifier: string,
 ): Promise<EnquiryPersistenceResult> {
   const { client, secret } = getSupabaseConnection()
   const keyHash = createHmac('sha256', secret).update(clientIdentifier).digest('hex')
-  const { data: allowed, error: rateLimitError } = await client.rpc('consume_enquiry_rate_limit', {
-    p_key_hash: keyHash,
-    p_limit: 5,
-    p_window_seconds: 900,
+
+  const result = await persistIfNew({
+    findExisting: async () => {
+      const existing = await findExistingEnquiry(client, enquiry.submissionId)
+      return existing ? toPersistedEnquiry(existing) : null
+    },
+    consumeRateLimit: async () => {
+      const { data: allowed, error } = await client.rpc('consume_enquiry_rate_limit', {
+        p_key_hash: keyHash,
+        p_limit: 5,
+        p_window_seconds: 900,
+      })
+
+      if (error) throw new Error('Enquiry rate limit could not be checked')
+      return allowed === true
+    },
+    create: async () => {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const reference = createReference()
+        const { data, error } = await client
+          .from('enquiries')
+          .insert({
+            submission_id: enquiry.submissionId,
+            reference,
+            full_name: enquiry.fullName,
+            email: enquiry.email,
+            phone: enquiry.phone,
+            country_of_residence: enquiry.countryOfResidence,
+            preferred_contact_channel: enquiry.preferredContactChannel,
+            interest: enquiry.interest,
+            message: enquiry.message,
+            travel_start_date: enquiry.travelStartDate,
+            dates_flexible: enquiry.datesFlexible,
+            traveller_count: enquiry.travellerCount,
+            source_page: enquiry.sourcePage,
+            notification_status: process.env.WEB3FORMS_ACCESS_KEY?.trim() ? 'pending' : 'not_configured',
+          })
+          .select(enquiryColumns)
+          .single()
+
+        if (!error && data) return { value: toPersistedEnquiry(data as EnquiryRow) }
+
+        if (error?.code === '23505') {
+          const existing = await findExistingEnquiry(client, enquiry.submissionId)
+          if (existing) return { value: toPersistedEnquiry(existing), duplicate: true }
+          continue
+        }
+
+        throw new Error('Enquiry could not be saved')
+      }
+
+      throw new Error('Enquiry reference could not be generated')
+    },
   })
 
-  if (rateLimitError) throw new Error('Enquiry rate limit could not be checked')
-  if (allowed !== true) return { status: 'rate_limited' }
+  if (result.status === 'rate_limited') return result
+  return { ...result.value, duplicate: result.duplicate }
+}
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const reference = createReference()
-    const { data, error } = await client
-      .from('enquiries')
-      .insert({
-        submission_id: enquiry.submissionId,
-        reference,
-        full_name: enquiry.fullName,
-        email: enquiry.email,
-        phone: enquiry.phone,
-        country_of_residence: enquiry.countryOfResidence,
-        preferred_contact_channel: enquiry.preferredContactChannel,
-        interest: enquiry.interest,
-        message: enquiry.message,
-        travel_start_date: enquiry.travelStartDate,
-        dates_flexible: enquiry.datesFlexible,
-        traveller_count: enquiry.travellerCount,
-        source_page: enquiry.sourcePage,
-        notification_status: 'pending',
-      })
-      .select(enquiryColumns)
-      .single()
+export function createEnquiryNotificationToken(submissionId: string, reference: string) {
+  const { secret } = getSupabaseConnection()
+  return createNotificationToken(submissionId, reference, secret)
+}
 
-    if (!error && data) return toPersistedEnquiry(data as EnquiryRow, true, false)
-
-    if (error?.code === '23505') {
-      const existing = await findExistingEnquiry(client, enquiry.submissionId)
-      if (existing) return resolveExistingEnquiry(client, existing)
-      continue
-    }
-
-    throw new Error('Enquiry could not be saved')
-  }
-
-  throw new Error('Enquiry reference could not be generated')
+export function verifyEnquiryNotificationToken(
+  token: string,
+  submissionId: string,
+  reference: string,
+) {
+  const { secret } = getSupabaseConnection()
+  return verifyNotificationToken(token, submissionId, reference, secret)
 }
 
 export async function updateEnquiryNotificationStatus(
   submissionId: string,
+  reference: string,
   status: 'sent' | 'failed',
 ) {
   const { client } = getSupabaseConnection()
@@ -203,9 +173,22 @@ export async function updateEnquiryNotificationStatus(
     .from('enquiries')
     .update({ notification_status: status, updated_at: new Date().toISOString() })
     .eq('submission_id', submissionId)
-    .eq('notification_status', 'pending')
+    .eq('reference', reference)
+    .in('notification_status', ['pending', 'failed'])
     .select('id')
     .maybeSingle()
 
-  if (error || !data) throw new Error('Enquiry notification status could not be updated')
+  if (error) throw new Error('Enquiry notification status could not be updated')
+  if (data) return
+
+  const { data: existing, error: lookupError } = await client
+    .from('enquiries')
+    .select('notification_status')
+    .eq('submission_id', submissionId)
+    .eq('reference', reference)
+    .maybeSingle()
+
+  if (lookupError || existing?.notification_status !== status) {
+    throw new Error('Enquiry notification status could not be updated')
+  }
 }

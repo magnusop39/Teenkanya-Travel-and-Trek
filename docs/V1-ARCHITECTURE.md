@@ -57,16 +57,19 @@ Introduce modules behind server-side boundaries as each capability is implemente
 - Collect only customer information needed to respond to the enquiry.
 
 ### Enquiry implementation status
-- `POST /api/enquiries` validates and stores submissions, applies a honeypot and a database-backed rate limit, and only reports success after Web3Forms confirms the submission.
-- Enquiry persistence and email delivery are tracked separately. A provider failure leaves the enquiry saved with `notification_status = failed`, returns a retryable error, and never displays a delivered-success state.
-- Retries use the same submission ID and saved enquiry snapshot, preventing duplicate records and avoiding edits to an already-saved enquiry being silently substituted.
-- Web3Forms credentials are server-only. Standard `/submit` binds the notification recipient to the access key; the app does not send `to` or Pro-only `ccemail` overrides. The Vercel server request must be allowed by the Web3Forms account's server-side/IP restrictions. If the provider rejects the request, the enquiry remains stored and the form reports that delivery was not confirmed.
+- `POST /api/enquiries` validates and saves submissions to Supabase before any notification attempt. Web3Forms failure cannot undo or lose the saved enquiry.
+- The Standard Web3Forms `POST /submit` endpoint is not supported for this app's server-side request pattern. Its documented usage is browser-side; server-side requests require a paid plan and server-IP safelisting. The browser submits directly to Web3Forms only after the API confirms persistence.
+- The Standard access key is necessarily public in this browser flow. It is returned only after a save and is tied to the configured recipient. It must not be treated as a secret or used to authorize other operations. The app sends neither `to` nor Pro-only `ccemail` overrides.
+- The UI distinguishes “enquiry saved” from “notification accepted.” A successful Web3Forms response means the provider accepted the notification request; it does not prove inbox delivery or confirm a booking. `notification_status = sent` records provider acceptance, not delivery.
+- Notification retries use the saved form snapshot, submission ID, reference, and a short-lived signed status token. They call Web3Forms only and never resubmit the enquiry. The UI keeps a saved enquiry locked after notification failure, shows its reference, and warns that an interrupted provider response can make an email-only retry create a duplicate notification.
+- Known idempotent replays are checked before the database rate-limit function, so ordinary retries do not consume another attempt. The unique submission ID still prevents duplicate rows. Concurrent first requests with the same ID can race before the separate rate-limit RPC and may consume an extra attempt; an atomic database function would be needed to eliminate that narrow quota race.
+- Only a valid Vercel `x-real-ip` is used for rate limiting. Missing or malformed values fail closed with a retryable service error; they never share an `unknown` bucket or fall back to `x-forwarded-for`.
 - The staff enquiry console remains a later milestone.
 
 ### Local setup and checks
 - Use pnpm 12.3.4 and run `pnpm install`.
 - Configure `SUPABASE_URL` and one server-only key (`SUPABASE_SECRET_KEY` or `SUPABASE_SERVICE_ROLE_KEY`) as shown in `.env.example`.
-- Configure `WEB3FORMS_ACCESS_KEY` in a server environment variable; set the intended notification recipient on that access key in the Web3Forms dashboard. Never expose the key to browser code.
+- Configure `WEB3FORMS_ACCESS_KEY` in the server environment and set the intended recipient on that key in the Web3Forms dashboard. In the free Standard browser integration the key is public by design, recipient-bound, and sent only after Supabase saves the enquiry. Keep Supabase server credentials server-only.
 - Apply `supabase/migrations/20261031000000_create_enquiries.sql` to the intended Supabase project before accepting submissions.
 - Run `pnpm dev` for local development, `pnpm check` for TypeScript and unit tests, and `pnpm build` for a production build.
 

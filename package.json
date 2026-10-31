@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test tests/enquiries-validation.test.mjs tests/enquiry-workflow.test.mjs tests/enquiry-request-security.test.mjs tests/web3forms.test.mjs",
+    "test": "node --experimental-strip-types --test tests/enquiries-validation.test.mjs tests/enquiry-workflow.test.mjs tests/enquiry-request-security.test.mjs tests/web3forms.test.mjs tests/notification-token.test.mjs",
     "check": "pnpm typecheck && pnpm test"
   },
   "dependencies": {
